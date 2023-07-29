@@ -11,14 +11,15 @@
 from functools import partial
 import math
 import logging
-from typing import Sequence, Tuple, Union, Callable
+from typing import Sequence, Tuple, Union, Callable, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.nn.init import trunc_normal_
 
-from ijepaext.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, Block, get_2d_pos_embed, apply_masks
+from ijepaext.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, Block
 
 
 logger = logging.getLogger("ijepaext")
@@ -58,10 +59,10 @@ class VisionTransformer(nn.Module):
         drop_path_rate=0.0,
         drop_path_uniform=False,
         init_values=None,  # for layerscale: None or 0 => no layerscale
+        head_dim=None,
         embed_layer=PatchEmbed,
         act_layer=nn.GELU,
         block_fn=Block,
-        norm_layer=nn.LayerNorm,
         ffn_layer="mlp",
         block_chunks=1,
     ):
@@ -91,13 +92,20 @@ class VisionTransformer(nn.Module):
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
-
+        self.num_tokens = 1
         self.n_blocks = depth
         self.num_heads = num_heads
         self.patch_size = patch_size
 
-        self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
-        self.pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=False)
+        self.patch_embed = embed_layer(
+            img_size=img_size, 
+            patch_size=patch_size, 
+            in_chans=in_chans, 
+            embed_dim=embed_dim)
+        
+        num_patches = self.patch_embed.num_patches
+
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
 
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
@@ -148,8 +156,8 @@ class VisionTransformer(nn.Module):
             self.chunked_blocks = False
             self.blocks = nn.ModuleList(blocks_list)
 
-        self.norm = norm_layer(embed_dim) if norm_layer is not None else nn.Identity()
-        self.head = nn.Identity()
+        self.norm = norm_layer(embed_dim)
+        self.head = nn.Linear(embed_dim, head_dim) if head_dim else nn.Identity()
 
         self.mask_token = nn.Parameter(torch.zeros(1, embed_dim))
 
@@ -186,12 +194,11 @@ class VisionTransformer(nn.Module):
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)
+        if masks is not None:
+            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
 
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
-
-        if masks is not None:
-            x = apply_masks(x, masks)
 
         return x
 
@@ -215,9 +222,6 @@ class VisionTransformer(nn.Module):
         return output
 
     def forward_features(self, x, masks=None):
-        if masks is not None and not isinstance(x, list):
-            masks = [masks]
-            
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
@@ -355,3 +359,70 @@ def vit_giant2(patch_size=16, **kwargs):
         **kwargs,
     )
     return model
+
+def _convert_openai_clip(state_dict, model):
+    out_dict = {}
+    swaps = [
+        ('visual.', ''), ('conv1', 'patch_embed.proj'), ('positional_embedding', 'pos_embed'),
+        ('transformer.resblocks.', 'blocks.'), ('ln_pre', 'patch_embed.norm'), ('ln_post', 'norm'), ('ln_', 'norm'),
+        ('in_proj_', 'qkv.'), ('out_proj', 'proj'), ('mlp.c_fc', 'mlp.fc1'), ('mlp.c_proj', 'mlp.fc2'),
+    ]
+    for k, v in state_dict.items():
+        if not k.startswith('visual.'):
+            continue
+        for sp in swaps:
+            k = k.replace(sp[0], sp[1])
+
+        if k == 'proj':
+            k = 'head.weight'
+            v = v.transpose(0, 1)
+            out_dict['head.bias'] = torch.zeros(v.shape[0])
+        elif k == 'class_embedding':
+            k = 'cls_token'
+            v = v.unsqueeze(0).unsqueeze(1)
+        elif k == 'pos_embed':
+            v = v.unsqueeze(0)
+            if v.shape[1] != model.pos_embed.shape[1]:
+                # To resize pos embedding when using model at different size from pretrained weights
+                v = resize_pos_embed(
+                    v,
+                    model.pos_embed,
+                    num_prefix_tokens=1,
+                    gs_new=model.patch_embed.grid_size
+                )
+        elif k == 'patch_embed.proj.weight':
+            out_dict['patch_embed.proj.bias'] = torch.zeros(v.shape[0])
+
+        out_dict[k] = v
+    return out_dict
+
+def resize_pos_embed(
+        posemb,
+        posemb_new,
+        num_prefix_tokens=1,
+        gs_new=(),
+        interpolation='bicubic',
+        antialias=False,
+):
+    """ Rescale the grid of position embeddings when loading from state_dict.
+
+    Adapted from:
+        https://github.com/google-research/vision_transformer/blob/00883dd691c63a6830751563748663526e811cee/vit_jax/checkpoint.py#L224
+    """
+    ntok_new = posemb_new.shape[1]
+    if num_prefix_tokens:
+        posemb_prefix, posemb_grid = posemb[:, :num_prefix_tokens], posemb[0, num_prefix_tokens:]
+        ntok_new -= num_prefix_tokens
+    else:
+        posemb_prefix, posemb_grid = posemb[:, :0], posemb[0]
+    gs_old = int(math.sqrt(len(posemb_grid)))
+    if not len(gs_new):  # backwards compatibility
+        gs_new = [int(math.sqrt(ntok_new))] * 2
+    assert len(gs_new) >= 2
+    logger.info(f'Resized position embedding: {posemb.shape} ({[gs_old, gs_old]}) to {posemb_new.shape} ({gs_new}).')
+    posemb_grid = posemb_grid.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
+    posemb_grid = F.interpolate(posemb_grid, size=gs_new, mode=interpolation, antialias=antialias, align_corners=False)
+    posemb_grid = posemb_grid.permute(0, 2, 3, 1).reshape(1, gs_new[0] * gs_new[1], -1)
+    posemb = torch.cat([posemb_prefix, posemb_grid], dim=1)
+    return posemb
+

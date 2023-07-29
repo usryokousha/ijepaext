@@ -32,6 +32,7 @@ class PredictorVisionTransformer(nn.Module):
         embed_dim=768,
         predictor_embed_dim=768,
         latent_embed_dim=768,
+        latent_num_patches = 196,
         depth=12,
         num_heads=12,
         mlp_ratio=4.0,
@@ -77,8 +78,9 @@ class PredictorVisionTransformer(nn.Module):
         self.patch_size = patch_size
 
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim)
-        self.latent_embed = nn.Linear(embed_dim, predictor_embed_dim)
-        self.pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=True)
+        self.latent_embed = nn.Linear(latent_embed_dim, predictor_embed_dim)
+        self.pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=False)
+        self.latent_pos_embed = nn.Parameter(embed_dim, latent_num_patches)
 
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
@@ -155,10 +157,12 @@ class PredictorVisionTransformer(nn.Module):
 
         # map from encoder-dim to pedictor-dim
         x = self.predictor_embed(x)
+        latent = self.latent_embed(latent)
 
-        # add positional embedding to x tokens
+        # add positional embeddings to x tokens and latent tokens
         x_pos_embed = self.predictor_pos_embed.repeat(B, 1, 1)
         x += apply_masks(x_pos_embed, masks_context)
+        latent += self.latent_pos_embed.repeat(B, 1, 1)
         num_context = x.shape[1]
 
         # concat mask tokens to x
@@ -172,12 +176,12 @@ class PredictorVisionTransformer(nn.Module):
         x = x.repeat(len(masks_predict), 1, 1)
         x = torch.cat([x, pred_tokens], dim=1)
 
-        return x, num_context
+        return x, latent, num_context
     
     def forward_features(self, x, masks_context, masks_predict):
-        x, num_context = self.prepare_tokens_with_masks(x, masks_context, masks_predict)
+        x, latent, num_context = self.prepare_tokens_with_masks(x, masks_context, masks_predict)
         for blk in self.blocks:
-            x = blk(x)
+            x = blk(x, latent)
 
         x_norm = self.predictor_norm(x)
         x_norm = x_norm[:, :num_context, :]

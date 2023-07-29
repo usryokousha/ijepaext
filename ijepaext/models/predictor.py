@@ -76,7 +76,7 @@ class PredictorVisionTransformer(nn.Module):
         self.patch_size = patch_size
 
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim)
-        self.pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=True)
+        self.pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=False)
 
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
