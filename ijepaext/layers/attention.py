@@ -13,7 +13,9 @@ import logging
 from torch import Tensor
 from torch import nn
 
-from typing import Optional
+from .relative_position import RelativePositionBias
+
+from typing import Optional, Callable
 
 
 logger = logging.getLogger("ijepaext")
@@ -38,6 +40,7 @@ class Attention(nn.Module):
         proj_bias: bool = True,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        rel_pos_bias: Optional[Callable] = None
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -48,13 +51,19 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
+        self.rel_pos_bias = rel_pos_bias
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, attn_bias=None) -> Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-
+            
         q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
         attn = q @ k.transpose(-2, -1)
+
+        if self.rel_pos_bias is not None:
+            attn = self.rel_pos_bias(attn, shared_attn_bias=attn_bias)
+        elif attn_bias is not None:
+            attn = attn + attn_bias
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
@@ -118,6 +127,9 @@ class MemEffAttention(Attention):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
 
         q, k, v = unbind(qkv, 2)
+
+        if self.rel_pos_bias is not None:
+            attn_bias = self.rel_pos_bias(attn_bias)
 
         x = memory_efficient_attention(q, k, v, attn_bias=attn_bias)
         x = x.reshape([B, N, C])
