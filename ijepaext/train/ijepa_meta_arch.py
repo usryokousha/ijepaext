@@ -76,12 +76,10 @@ class IJEPAMetaArch(nn.Module):
         mask_context = [m.cuda(non_blocking=True) for m in mask_context]
         mask_predictor = [m.cuda(non_blocking=True) for m in mask_predictor]
         
-
-
         # teacher output
         @torch.no_grad()
         def get_teacher_output():
-            targets = self.teacher.target_encoder(images)
+            targets = self.teacher.target_encoder(images)["x_norm"]
             targets = nn.functional.layer_norm(targets, [targets.shape[-1]])
             targets = apply_masks(targets, mask_predictor)
             targets = repeat_interleave_batch(targets, self.cfg.data.batch_size)

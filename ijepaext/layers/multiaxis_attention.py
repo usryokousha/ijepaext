@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .attention import Attention, CrossAttention, MemEffAttention, MemEffCrossAttention
+from .attention import Attention, MemEffAttention
 from typing import Optional
 
 class MultiAxisAttention(nn.Module):
@@ -42,51 +42,51 @@ class MultiAxisAttention(nn.Module):
         self._patch_num = None
         self._grid_num = None
 
-    def _separate_patch(self, x):
-        """Input tensor of shape [batch, grid, patch, dim]"""
+    def _patch_attn(self, x: torch.Tensor):
         B, G, P, C = x.shape
-        self._grid_num = G
         x = x.reshape(B * G, P, C)
-        return x
-    
-    def _separate_grid(self, x):
-        """Input tensor of shape [batch, grid, patch, dim]"""
-        B, G, P, C = x.shape
-        self._patch_num = P
-        x = x.permute(0, 2, 1, 3)
-        x = x.reshape(B * P, G, C)
-        return x
-    
-    def _merge_patch(self, x):
-        """Input tensor of shape [batch * grid, patch, dim]"""
-        BG, P, C = x.shape
-        x = x.reshape(BG // self._grid_num, self._grid_num, P, C)
-        return x
-    
-    def _merge_grid(self, x):
-        """Input tensor of shape [batch * patch, grid, dim]"""
-        BP, G, C = x.shape
-        x = x.reshape(BP // self._patch_num, self._patch_num, G, C)
-        x = x.permute(0, 2, 1, 3)
-        return x
+        x = self.patch_attn(x)
+        return x.reshape(B, G, P, C)
     
     def _grid_attn(self, x: torch.Tensor):
-        """Input tensor of shape [batch, grid, patch, dim]"""
-        x = self._separate_patch(x)
+        B, G, P, C = x.shape
+        x = x.permute(0, 2, 1, 3).reshape(B * P, G, C)
         x = self.grid_attn(x)
-        x = self._merge_patch(x)
-        return x
-
-    def _patch_attn(self, x: torch.Tensor):
-        """Input tensor of shape [batch, grid, patch, dim]"""
-        x = self._separate_grid(x)
-        x = self.patch_attn(x)
-        x = self._merge_grid(x)
-        return x
+        return x.reshape(B, P, G, C).permute(0, 2, 1, 3)
 
     def forward(self, x: torch.Tensor):
-        """Input tensor of shape [batch, grid, patch, dim]"""
-        x_grid, x_patch = torch.split(x, x.shape[-1] // 2, dim=-1)
+        """
+        Splits the input tensor into grid and patch tensors, 
+        applies attention to each, and concatenates the results.
+        """
+        x_grid, x_patch = torch.chunk(x, 2, dim=-1)
         x_grid = self._grid_attn(x_grid)
         x_patch = self._patch_attn(x_patch)
-        return torch.cat([x_grid, x_patch], dim=-1) 
+        return torch.cat([x_grid, x_patch], dim=-1)
+
+def block_images(inputs: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """Converts the image to blocked patches."""
+    # inputs: (batch_size, height, width, channels)
+    _, height, width, channel_dim = inputs.shape
+    patch_length = patch_size**2
+
+    outputs = inputs.permute(0, 3, 1, 2)
+    outputs = outputs.reshape(-1, channel_dim, height // patch_size, patch_size, width // patch_size, patch_size)
+    outputs = outputs.permute(0, 2, 4, 1, 3, 5)
+    outputs = outputs.reshape(-1, height * width // patch_length, patch_length, channel_dim)
+    # outputs: (batch_size, grid_h * grid_w, patch_h * patch_w, channels)
+    return outputs
+
+
+def unblock_images(inputs: torch.Tensor, grid_size: int, patch_size: int) -> torch.Tensor:
+    """Converts blocked patches to the image."""
+    # inputs: (batch_size, grid_h * grid_w, patch_h * patch_w, channels)
+    grid_width = grid_size
+    grid_height = inputs.shape[1] // grid_width
+    channel_dim = inputs.shape[3]
+
+    outputs = inputs.reshape(-1, grid_height, grid_width, patch_size, patch_size, channel_dim)
+    outputs = outputs.permute(0, 1, 3, 2, 4, 5)
+    outputs = outputs.reshape(-1, grid_height * patch_size, grid_width * patch_size, channel_dim)
+    # outputs: (batch_size, height, width, channels)
+    return outputs

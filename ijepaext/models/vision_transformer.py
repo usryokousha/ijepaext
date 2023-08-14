@@ -187,7 +187,6 @@ class VisionTransformer(nn.Module):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)
 
-        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
 
         if masks is not None:
@@ -206,8 +205,7 @@ class VisionTransformer(nn.Module):
             x_norm = self.norm(x)
             output.append(
                 {
-                    "x_norm_clstoken": x_norm[:, 0],
-                    "x_norm_patchtokens": x_norm[:, 1:],
+                    "x_norm": x_norm,
                     "x_prenorm": x,
                     "masks": masks,
                 }
@@ -228,8 +226,7 @@ class VisionTransformer(nn.Module):
 
         x_norm = self.norm(x)
         return {
-            "x_norm_clstoken": x_norm[:, 0],
-            "x_norm_patchtokens": x_norm[:, 1:],
+            "x_norm": x_norm,
             "x_prenorm": x,
             "masks": masks,
         }
@@ -265,7 +262,6 @@ class VisionTransformer(nn.Module):
         x: torch.Tensor,
         n: Union[int, Sequence] = 1,  # Layers or n last layers to take
         reshape: bool = False,
-        return_class_token: bool = False,
         norm=True,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
         if self.chunked_blocks:
@@ -274,16 +270,12 @@ class VisionTransformer(nn.Module):
             outputs = self._get_intermediate_layers_not_chunked(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
-        class_tokens = [out[:, 0] for out in outputs]
-        outputs = [out[:, 1:] for out in outputs]
         if reshape:
             B, _, w, h = x.shape
             outputs = [
                 out.reshape(B, w // self.patch_size, h // self.patch_size, -1).permute(0, 3, 1, 2).contiguous()
                 for out in outputs
             ]
-        if return_class_token:
-            return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
 
     def forward(self, *args, is_training=False, **kwargs):
@@ -291,7 +283,7 @@ class VisionTransformer(nn.Module):
         if is_training:
             return ret
         else:
-            return self.head(ret["x_norm_clstoken"])
+            return self.head(ret["x_norm"])
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = ""):

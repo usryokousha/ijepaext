@@ -5,7 +5,7 @@
 from functools import partial
 import math
 import logging
-from typing import Sequence, Tuple, Union, Callable
+from typing import Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -76,7 +76,7 @@ class PredictorVisionTransformer(nn.Module):
         self.patch_size = patch_size
 
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim)
-        self.pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=False)
+        self.predictor_pos_embed = get_2d_pos_embed(embed_dim, img_size // patch_size, cls_token=False)
 
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
@@ -135,7 +135,7 @@ class PredictorVisionTransformer(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        trunc_normal_(self.pos_embed, std=0.02)
+        trunc_normal_(self.predictor_pos_embed, std=0.02)
         named_apply(init_weights_vit_timm, self)
 
     def prepare_tokens_with_masks(self, x, masks_context, masks_predict):
@@ -213,7 +213,6 @@ class PredictorVisionTransformer(nn.Module):
         x: torch.Tensor,
         n: Union[int, Sequence] = 1,  # Layers or n last layers to take
         reshape: bool = False,
-        return_class_token: bool = False,
         norm=True,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
         if self.chunked_blocks:
@@ -221,15 +220,11 @@ class PredictorVisionTransformer(nn.Module):
         else:
             outputs = self._get_intermediate_layers_not_chunked(x, n)
         if norm:
-            outputs = [self.norm(out) for out in outputs]
-        class_tokens = [out[:, 0] for out in outputs]
-        outputs = [out[:, 1:] for out in outputs]
+            outputs = [self.predictor_norm(out) for out in outputs]
         if reshape:
             B, _, w, h = x.shape
             outputs = [
                 out.reshape(B, w // self.patch_size, h // self.patch_size, -1).permute(0, 3, 1, 2).contiguous()
                 for out in outputs
             ]
-        if return_class_token:
-            return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
