@@ -24,7 +24,7 @@ logger = logging.getLogger("ijepaext")
 
 from .vision_transformer import named_apply, BlockChunk, init_weights_vit_timm
 
-class PredictorVisionTransformer(nn.Module):
+class CrossPredictorVisionTransformer(nn.Module):
     def __init__(
         self,
         img_size=224,
@@ -219,7 +219,6 @@ class PredictorVisionTransformer(nn.Module):
         x: torch.Tensor,
         n: Union[int, Sequence] = 1,  # Layers or n last layers to take
         reshape: bool = False,
-        return_class_token: bool = False,
         norm=True,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
         if self.chunked_blocks:
@@ -228,14 +227,65 @@ class PredictorVisionTransformer(nn.Module):
             outputs = self._get_intermediate_layers_not_chunked(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
-        class_tokens = [out[:, 0] for out in outputs]
-        outputs = [out[:, 1:] for out in outputs]
         if reshape:
             B, _, w, h = x.shape
             outputs = [
                 out.reshape(B, w // self.patch_size, h // self.patch_size, -1).permute(0, 3, 1, 2).contiguous()
                 for out in outputs
             ]
-        if return_class_token:
-            return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
+
+def vit_predictor_small(patch_size=16, **kwargs):
+    model = CrossPredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=6,
+        num_heads=6,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_base(patch_size=16, **kwargs):
+    model = CrossPredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=6,
+        num_heads=12,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_large(patch_size=16, **kwargs):
+    model = CrossPredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=16,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_huge(patch_size=16, **kwargs):
+    model = CrossPredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=32,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_giant(patch_size=16, **kwargs):
+    model = CrossPredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=32,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model

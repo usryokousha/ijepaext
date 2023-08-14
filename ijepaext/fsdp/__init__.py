@@ -8,7 +8,7 @@ import os
 from typing import Any
 
 import torch
-import dinov2.distributed as distributed
+import ijepaext.distributed as distributed
 from functools import partial
 from fvcore.common.checkpoint import Checkpointer
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP

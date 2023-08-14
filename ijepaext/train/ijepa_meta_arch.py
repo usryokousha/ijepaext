@@ -5,9 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from contextlib import contextmanager
+from typing import Generator
 
 import torch
 from torch import nn
+from torch.distributed.fsdp import FullyShardedDataParallel
 
 from ijepaext.models import build_model_from_cfg
 from ijepaext.layers import apply_masks, repeat_interleave_batch
@@ -66,6 +69,7 @@ class IJEPAMetaArch(nn.Module):
         raise NotImplementedError
 
     def backprop_loss(self, loss):
+        loss = loss / self.cfg.train.iters_to_accumulate
         if self.fp16_scaler is not None:
             self.fp16_scaler.scale(loss).backward()
         else:
@@ -155,3 +159,36 @@ class IJEPAMetaArch(nn.Module):
         self.student.predictor = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student.predictor)
         teacher_model_cfg = self.cfg.compute_precision.teacher.encoder
         self.teacher.encoder = get_fsdp_wrapper(teacher_model_cfg, modules_to_wrap={BlockChunk})(self.teacher.encoder)
+
+    @contextmanager
+    def no_sync(self) -> Generator:
+        """
+        A context manager to disable gradient synchronizations across FSDP
+        instances. Within this context, gradients will be accumulated in module
+        variables, which will later be synchronized in the first
+        forward-backward pass after exiting the context. This should only be
+        used on the root FSDP instance and will recursively apply to all
+        children FSDP instances.
+
+        .. note:: This likely results in higher memory usage because FSDP will
+            accumulate the full model gradients (instead of gradient shards)
+            until the eventual sync.
+
+        .. note:: When used with CPU offloading, the gradients will not be
+            offloaded to CPU when inside the context manager. Instead, they
+            will only be offloaded right after the eventual sync.
+        """
+        old_flags = []
+        for m in self.modules():
+            if isinstance(m, FullyShardedDataParallel):
+                old_flags.append((m, m._sync_gradients))
+                m._sync_gradients = False
+        try:
+            yield
+        finally:
+            for m, old_flag in old_flags:
+                assert not m._sync_gradients, (
+                    "`_sync_gradients` was incorrectly set to "
+                    "`True` while in the `no_sync()` context manager"
+                )
+                m._sync_gradients = old_flag

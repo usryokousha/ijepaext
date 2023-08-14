@@ -14,7 +14,7 @@ from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
 
 from ijepaext.data import SamplerType, make_data_loader, make_dataset
-from ijepaext.data import DataAugmentationDINO
+from ijepaext.data import make_pretrain_transform
 from ijepaext.masking.multiblock import MaskCollator
 
 import ijepaext.distributed as distributed
@@ -181,12 +181,13 @@ def do_train(cfg, model, resume=False):
         min_keep=cfg.masking.min_keep,
         allow_overlap=cfg.masking.allow_overlap,)
 
-    data_transform = DataAugmentationDINO(
-        cfg.crops.global_crops_scale,
-        cfg.crops.local_crops_scale,
-        cfg.crops.local_crops_number,
-        global_crops_size=cfg.crops.global_crops_size,
-        local_crops_size=cfg.crops.local_crops_size,
+    data_transform = make_pretrain_transform(
+        cfg.crops.crop_size,
+        cfg.crops.crop_scale,
+        cfg.crops.color_jitter,
+        cfg.crops.horizontal_flip,
+        cfg.crops.color_distortion,
+        cfg.crops.gaussian_blur,
     )
 
     # setup data loader
@@ -194,11 +195,11 @@ def do_train(cfg, model, resume=False):
     dataset = make_dataset(
         dataset_str=cfg.train.dataset_path,
         transform=data_transform,
-        target_transform=lambda _: (),
+        target_transform=None,
     )
     # sampler_type = SamplerType.INFINITE
     sampler_type = SamplerType.SHARDED_INFINITE
-    data_loader = make_data_loader(
+    data_loader = iter(make_data_loader(
         dataset=dataset,
         batch_size=cfg.train.batch_size_per_gpu,
         num_workers=cfg.train.num_workers,
@@ -208,7 +209,7 @@ def do_train(cfg, model, resume=False):
         sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
         drop_last=True,
         collate_fn=collate_fn,
-    )
+    ))
 
     # training loop
 
@@ -219,14 +220,13 @@ def do_train(cfg, model, resume=False):
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
     header = "Training"
 
-    for data in metric_logger.log_every(
-        data_loader,
+    for _ in metric_logger.log_every(
+        range(max_iter),
         10,
         header,
         max_iter,
         start_iter,
     ):
-        current_batch_size = data["collated_global_crops"].shape[0] / 2
         if iteration > max_iter:
             return
 
@@ -239,10 +239,18 @@ def do_train(cfg, model, resume=False):
         last_layer_lr = last_layer_lr_schedule[iteration]
         apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
 
-        # compute losses
-
         optimizer.zero_grad(set_to_none=True)
-        loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
+        total_batch_size = 0
+        for i in range(cfg.train.iters_to_accumulate):
+            data = next(data_loader)
+            current_batch_size = data[0][0].shape[0]
+            total_batch_size += current_batch_size
+            # compute losses
+            if i == cfg.train.iters_to_accumulate - 1:
+                loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
+            else:
+                with model.no_sync():
+                    loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
 
         # clip gradients
 
@@ -279,7 +287,7 @@ def do_train(cfg, model, resume=False):
         metric_logger.update(wd=wd)
         metric_logger.update(mom=mom)
         metric_logger.update(last_layer_lr=last_layer_lr)
-        metric_logger.update(current_batch_size=current_batch_size)
+        metric_logger.update(current_batch_size=total_batch_size)
         metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
 
         # checkpointing and testing

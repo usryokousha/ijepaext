@@ -61,6 +61,8 @@ student:
     ffn_bias: true
   predictor:
     arch: vit_predictor_large
+    drop_path_rate: 0.0
+    drop_path_uniform: true
 teacher:
   momentum_teacher: 0.992
   final_momentum_teacher: 1

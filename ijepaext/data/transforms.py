@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Sequence
+from PIL import ImageFilter
 
 import torch
 from torchvision import transforms
@@ -90,3 +91,37 @@ def make_classification_eval_transform(
         make_normalize_transform(mean=mean, std=std),
     ]
     return transforms.Compose(transforms_list)
+
+def make_pretrain_transform(
+    crop_size=224,
+    crop_scale=(0.3, 1.0),
+    color_jitter=1.0,
+    horizontal_flip=False,
+    color_distortion=False,
+    gaussian_blur=False,
+    mean: Sequence[float] = IMAGENET_DEFAULT_MEAN,
+    std: Sequence[float] = IMAGENET_DEFAULT_STD,
+):
+    def get_color_distortion(s=1.0):
+        # s is the strength of color distortion.
+        color_jitter = transforms.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s)
+        rnd_color_jitter = transforms.RandomApply([color_jitter], p=0.8)
+        rnd_gray = transforms.RandomGrayscale(p=0.2)
+        color_distort = transforms.Compose([
+            rnd_color_jitter,
+            rnd_gray])
+        return color_distort
+
+    transform_list = []
+    transform_list += [transforms.RandomResizedCrop(crop_size, scale=crop_scale)]
+    if horizontal_flip:
+        transform_list += [transforms.RandomHorizontalFlip()]
+    if color_distortion:
+        transform_list += [get_color_distortion(s=color_jitter)]
+    if gaussian_blur:
+        transform_list += [GaussianBlur(p=0.5)]
+    transform_list += [transforms.ToTensor()]
+    transform_list += [transforms.Normalize(mean, std)]
+
+    transform = transforms.Compose(transform_list)
+    return transform
