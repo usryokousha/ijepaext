@@ -228,3 +228,58 @@ class PredictorVisionTransformer(nn.Module):
                 for out in outputs
             ]
         return tuple(outputs)
+
+def vit_predictor_small(patch_size=16, **kwargs):
+    model = PredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=6,
+        num_heads=6,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_base(patch_size=16, **kwargs):
+    model = PredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=6,
+        num_heads=12,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_large(patch_size=16, **kwargs):
+    model = PredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=16,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_huge(patch_size=16, **kwargs):
+    model = PredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=32,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model
+
+def vit_predictor_giant(patch_size=16, **kwargs):
+    model = PredictorVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=32,
+        mlp_ratio=4,
+        **kwargs,
+    )
+    return model

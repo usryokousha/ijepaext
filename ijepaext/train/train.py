@@ -13,23 +13,25 @@ from functools import partial
 from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
 
-from dinov2.data import SamplerType, make_data_loader, make_dataset
-from dinov2.data import collate_data_and_cast, DataAugmentationDINO, MaskingGenerator
-import dinov2.distributed as distributed
-from dinov2.fsdp import FSDPCheckpointer
-from dinov2.logging import MetricLogger
-from dinov2.utils.config import setup
-from dinov2.utils.utils import CosineScheduler
+from ijepaext.data import SamplerType, make_data_loader, make_dataset
+from ijepaext.data import DataAugmentationDINO
+from ijepaext.masking.multiblock import MaskCollator
 
-from dinov2.train.ssl_meta_arch import SSLMetaArch
+import ijepaext.distributed as distributed
+from ijepaext.fsdp import FSDPCheckpointer
+from ijepaext.logging import MetricLogger
+from ijepaext.utils.config import setup
+from ijepaext.utils.utils import CosineScheduler
+
+from ijepaext.train.ijepa_meta_arch import IJEPAMetaArch
 
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
-logger = logging.getLogger("dinov2")
+logger = logging.getLogger("ijepaext")
 
 
 def get_args_parser(add_help: bool = True):
-    parser = argparse.ArgumentParser("DINOv2 training", add_help=add_help)
+    parser = argparse.ArgumentParser("ijepaext training", add_help=add_help)
     parser.add_argument("--config-file", default="", metavar="FILE", help="path to config file")
     parser.add_argument(
         "--no-resume",
@@ -167,11 +169,17 @@ def do_train(cfg, model, resume=False):
 
     img_size = cfg.crops.global_crops_size
     patch_size = cfg.student.patch_size
-    n_tokens = (img_size // patch_size) ** 2
-    mask_generator = MaskingGenerator(
-        input_size=(img_size // patch_size, img_size // patch_size),
-        max_num_patches=0.5 * img_size // patch_size * img_size // patch_size,
-    )
+
+    collate_fn = MaskCollator(
+        input_size=(img_size, img_size),
+        patch_size=patch_size,
+        enc_mask_scale=cfg.masking.enc_mask_scale,
+        pred_mask_scale=cfg.masking.pred_mask_scale,
+        aspect_ratio=cfg.masking.aspect_ratio,
+        nenc=cfg.masking.nenc,
+        npred=cfg.masking.npred,
+        min_keep=cfg.masking.min_keep,
+        allow_overlap=cfg.masking.allow_overlap,)
 
     data_transform = DataAugmentationDINO(
         cfg.crops.global_crops_scale,
@@ -179,15 +187,6 @@ def do_train(cfg, model, resume=False):
         cfg.crops.local_crops_number,
         global_crops_size=cfg.crops.global_crops_size,
         local_crops_size=cfg.crops.local_crops_size,
-    )
-
-    collate_fn = partial(
-        collate_data_and_cast,
-        mask_ratio_tuple=cfg.ibot.mask_ratio_min_max,
-        mask_probability=cfg.ibot.mask_sample_probability,
-        n_tokens=n_tokens,
-        mask_generator=mask_generator,
-        dtype=inputs_dtype,
     )
 
     # setup data loader
@@ -298,7 +297,7 @@ def do_train(cfg, model, resume=False):
 def main(args):
     cfg = setup(args)
 
-    model = SSLMetaArch(cfg).to(torch.device("cuda"))
+    model = IJEPAMetaArch(cfg).to(torch.device("cuda"))
     model.prepare_for_distributed_training()
 
     logger.info("Model:\n{}".format(model))

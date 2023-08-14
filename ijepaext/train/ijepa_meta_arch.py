@@ -38,19 +38,19 @@ class IJEPAMetaArch(nn.Module):
         student_model_dict = dict()
         teacher_model_dict = dict()
 
-        context_encoder, target_encoder, predictor = build_model_from_cfg(cfg)
-        student_model_dict["context_encoder"] = context_encoder
+        student_encoder, teacher_encoder, predictor = build_model_from_cfg(cfg)
+        student_model_dict["encoder"] = student_encoder
         student_model_dict["predictor"] = predictor
-        teacher_model_dict["target_encoder"] = target_encoder
-        logger.info(f"OPTIONS -- context encoder : embed_dim: {context_encoder.embed_dim}")
+        teacher_model_dict["encoder"] = teacher_encoder
+        logger.info(f"OPTIONS -- context encoder : embed_dim: {student_encoder.embed_dim}")
         logger.info(f"OPTIONS -- predictor : embed_dim: {predictor.embed_dim}")
 
         if cfg.student.pretrained_weights:
             chkpt = torch.load(cfg.student.pretrained_weights)
             logger.info(f"OPTIONS -- pretrained weights: loading from {cfg.student.pretrained_weights}")
-            context_encoder.load_state_dict(chkpt["model"], strict=False)
+            student_encoder.load_state_dict(chkpt["model"], strict=False)
 
-        self.embed_dim = context_encoder.embed_dim
+        self.embed_dim = student_encoder.embed_dim
 
         self.need_to_synchronize_fsdp_streams = True
 
@@ -79,7 +79,7 @@ class IJEPAMetaArch(nn.Module):
         # teacher output
         @torch.no_grad()
         def get_teacher_output():
-            targets = self.teacher.target_encoder(images)["x_norm"]
+            targets = self.teacher.encoder(images)["x_norm"]
             targets = nn.functional.layer_norm(targets, [targets.shape[-1]])
             targets = apply_masks(targets, mask_predictor)
             targets = repeat_interleave_batch(targets, self.cfg.data.batch_size)
@@ -92,7 +92,7 @@ class IJEPAMetaArch(nn.Module):
         loss_accumulator = 0  # for backprop
         
         # student output
-        z = self.student.context_encoder(images, mask_context)
+        z = self.student.encoder(images, mask_context)["x_norm"]
         z = self.student.predictor(z, mask_context, mask_predictor)
 
         l1_loss = nn.functional.smooth_l1_loss(z, h)
@@ -149,9 +149,9 @@ class IJEPAMetaArch(nn.Module):
         if has_batchnorms(self.student):
             raise NotImplementedError
         # below will synchronize all student subnetworks across gpus:
-        self.teacher.target_encoder.load_state_dict(self.student.context_encoder.state_dict())
-        student_model_cfg = self.cfg.compute_precision.student.context_encoder
-        self.student.context_encoder = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student.context_encoder)
+        self.teacher.encoder.load_state_dict(self.student.encoder.state_dict())
+        student_model_cfg = self.cfg.compute_precision.student.encoder
+        self.student.encoder = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student.encoder)
         self.student.predictor = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student.predictor)
-        teacher_model_cfg = self.cfg.compute_precision.teacher.target_encoder
-        self.teacher.target_encoder = get_fsdp_wrapper(teacher_model_cfg, modules_to_wrap={BlockChunk})(self.teacher.target_encoder)
+        teacher_model_cfg = self.cfg.compute_precision.teacher.encoder
+        self.teacher.encoder = get_fsdp_wrapper(teacher_model_cfg, modules_to_wrap={BlockChunk})(self.teacher.encoder)
